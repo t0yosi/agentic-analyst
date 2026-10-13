@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from config.settings import (
+    DEFAULT_ENV_FILE,
+    PROJECT_ROOT,
     AgentConfig,
     AppConfig,
     DatabaseConfig,
     ForecastConfig,
     LLMConfig,
     load_app_config,
+    load_env_file,
 )
 from utils.errors import ConfigError
 
@@ -100,3 +106,71 @@ class TestLoadAppConfig:
         with caplog.at_level("INFO"):
             AppConfig().log_active_config()
         assert sum("[CONFIG]" in r.message for r in caplog.records) == 3
+
+
+class TestLoadEnvFile:
+    def test_missing_file_is_not_an_error(self, tmp_path: Path) -> None:
+        assert load_env_file(tmp_path / "absent.env") is False
+
+    def test_reads_values_into_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ANALYST_MODEL", raising=False)
+        env = tmp_path / ".env"
+        env.write_text("ANALYST_MODEL=from-the-file\n")
+        assert load_env_file(env) is True
+        assert os.environ["ANALYST_MODEL"] == "from-the-file"
+
+    def test_does_not_overwrite_an_exported_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ANALYST_MODEL", "from-the-export")
+        env = tmp_path / ".env"
+        env.write_text("ANALYST_MODEL=from-the-file\n")
+        load_env_file(env)
+        assert os.environ["ANALYST_MODEL"] == "from-the-export"
+
+    def test_ignores_comments_and_blank_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ANALYST_DB_PATH", raising=False)
+        env = tmp_path / ".env"
+        env.write_text("# a comment\n\nANALYST_DB_PATH=from-file.db\n")
+        load_env_file(env)
+        assert os.environ["ANALYST_DB_PATH"] == "from-file.db"
+
+    def test_default_path_is_resolved_from_the_package_not_the_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert DEFAULT_ENV_FILE == PROJECT_ROOT / ".env"
+        assert DEFAULT_ENV_FILE.is_absolute()
+
+
+class TestLoadAppConfigReadsEnvFile:
+    def test_api_key_comes_from_the_env_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The shipped bug: SETUP.md told users to write .env, but nothing read
+        # it, so this raised ConfigError with a key sitting right there.
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        env = tmp_path / ".env"
+        env.write_text("ANTHROPIC_API_KEY=key-from-file\n")
+        config = load_app_config(require_api_key=True, env_file=env)
+        assert config.llm.api_key == "key-from-file"
+
+    def test_model_comes_from_the_env_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ANALYST_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+        env = tmp_path / ".env"
+        env.write_text("ANALYST_MODEL=file-model\n")
+        assert load_app_config(env_file=env).llm.model == "file-model"
+
+    def test_still_raises_when_no_key_anywhere(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        with pytest.raises(ConfigError, match="ANTHROPIC_API_KEY is not set"):
+            load_app_config(require_api_key=True, env_file=tmp_path / "absent.env")

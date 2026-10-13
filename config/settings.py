@@ -20,6 +20,46 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "claude-haiku-4-5"
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def load_env_file(path: Optional[Path] = None) -> bool:
+    """Load environment variables from a ``.env`` file, if one is present.
+
+    The path is resolved from this file's location rather than the working
+    directory, so the project's ``.env`` is found no matter where the process
+    was started from.
+
+    Variables already set in the environment are never overwritten, so an
+    explicit ``export`` always wins over the file.
+
+    Args:
+        path: The file to read. Defaults to ``.env`` at the project root.
+
+    Returns:
+        True if a file was found and read, False otherwise.
+    """
+    env_path = path or DEFAULT_ENV_FILE
+    if not env_path.is_file():
+        logger.debug("[CONFIG] no env file at %s", env_path)
+        return False
+
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        logger.warning(
+            "[CONFIG] %s exists but python-dotenv is not installed, so it was "
+            "ignored; install it with 'pip install python-dotenv' or export the "
+            "variables instead",
+            env_path,
+        )
+        return False
+
+    load_dotenv(env_path, override=False)
+    logger.info("[CONFIG] env file loaded from %s", env_path)
+    return True
+
 
 @dataclass
 class LLMConfig:
@@ -129,12 +169,19 @@ class AppConfig:
         )
 
 
-def load_app_config(require_api_key: bool = False) -> AppConfig:
+def load_app_config(
+    require_api_key: bool = False, env_file: Optional[Path] = None
+) -> AppConfig:
     """Build an :class:`AppConfig` from environment variables.
+
+    A ``.env`` file at the project root is read first, if present. Anything
+    already exported takes precedence over it.
 
     Args:
         require_api_key: When True, a missing ``ANTHROPIC_API_KEY`` is fatal.
             Leave False for offline work and tests, which use the mock client.
+        env_file: Override the env file to read. Tests use this; callers
+            normally leave it unset.
 
     Returns:
         A fully validated configuration object.
@@ -142,6 +189,8 @@ def load_app_config(require_api_key: bool = False) -> AppConfig:
     Raises:
         ConfigError: If ``require_api_key`` is True and no key is present.
     """
+    load_env_file(env_file)
+
     api_key = os.environ.get("ANTHROPIC_API_KEY") or None
     if require_api_key and not api_key:
         raise ConfigError(
